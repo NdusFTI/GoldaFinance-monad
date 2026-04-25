@@ -241,9 +241,9 @@ The GoldaVault contract is deployed and verified on Monad Mainnet.
 | Parameter | Value |
 |---|---|
 | Network | Monad Mainnet |
-| Chain ID | 10143 |
-| RPC URL | `https://testnet-rpc.monad.xyz` |
-| Block Explorer | `https://testnet.monadscan.com` |
+| Chain ID | 143 |
+| RPC URL | `[https://testnet-rpc.monad.xyz](https://monad-mainnet.g.alchemy.com/v2/5FHf0Nnr76lkYNj0ibOpC)` |
+| Block Explorer | `[https://testnet.monadscan.com](https://monadscan.com)` |
 
 ---
 
