@@ -18,6 +18,11 @@ import { getUserBalances } from '@/lib/services/contractService';
 import { EXPLORER_URL, CHAIN_ID, RPC_URL } from '@/lib/services/contractService';
 import { MONAD_MAINNET } from '@/lib/types';
 import {
+    DEFI_PROTOCOLS,
+    depositToProtocol,
+    type DeFiProtocol,
+} from '@/lib/services/defiProtocolService';
+import {
     ArrowLeft,
     Zap,
     Brain,
@@ -28,84 +33,9 @@ import {
     ChevronRight,
     Sparkles,
     TrendingUp,
+    ArrowRight,
+    Coins,
 } from 'lucide-react';
-
-// ─── Protocol definitions ─────────────────────────────────────────────────────
-
-interface Protocol {
-    id: string;
-    name: string;
-    icon: string;
-    apy: number;
-    risk: 'low' | 'medium' | 'high';
-    assets: string[];
-    desc: string;
-    tvl: string;
-    toToken: string;         // token address to swap USDC into
-    toSymbol: string;        // human label
-    toDecimals: number;
-}
-
-const PROTOCOLS: Protocol[] = [
-    {
-        id: 'kuru',
-        name: 'Kuru Exchange',
-        icon: '⚡',
-        apy: 22.5,
-        risk: 'high',
-        assets: ['XAUt0', 'WBTC'],
-        desc: 'Monad-native order-book DEX. Market-make on gold & BTC pairs.',
-        tvl: '$12.1M',
-        toToken: MONAD_TOKENS.XAUt0.address,
-        toSymbol: 'XAUt0',
-        toDecimals: 6,
-    },
-    {
-        id: 'neverland',
-        name: 'Neverland Finance',
-        icon: '🌿',
-        apy: 18.5,
-        risk: 'medium',
-        assets: ['XAUt0'],
-        desc: 'Gold-backed yield farming native to Monad. Earn yield on tokenised gold.',
-        tvl: '$3.2M',
-        toToken: MONAD_TOKENS.XAUt0.address,
-        toSymbol: 'XAUt0',
-        toDecimals: 6,
-    },
-    {
-        id: 'ambient',
-        name: 'Ambient Finance',
-        icon: '💧',
-        apy: 14.7,
-        risk: 'medium',
-        assets: ['WBTC', 'XAUt0'],
-        desc: 'Concentrated liquidity AMM on Monad. Provide BTC/gold liquidity.',
-        tvl: '$8.6M',
-        toToken: MONAD_TOKENS.WBTC.address,
-        toSymbol: 'WBTC',
-        toDecimals: 8,
-    },
-    {
-        id: 'morpho',
-        name: 'Morpho Blue',
-        icon: '🦋',
-        apy: 12.3,
-        risk: 'low',
-        assets: ['WBTC'],
-        desc: 'Peer-to-peer lending protocol. Supply WBTC, earn optimised lending yield.',
-        tvl: '$8.9M',
-        toToken: MONAD_TOKENS.WBTC.address,
-        toSymbol: 'WBTC',
-        toDecimals: 8,
-    },
-];
-
-const RISK_STYLE = {
-    low:    { cls: 'bg-info-soft text-[var(--info)]',       label: 'Low Risk' },
-    medium: { cls: 'bg-warning-soft text-[var(--warning)]', label: 'Med Risk' },
-    high:   { cls: 'bg-success-soft text-[var(--success)]', label: 'High Risk' },
-};
 
 // ─── AI analysis ─────────────────────────────────────────────────────────────
 
@@ -116,7 +46,7 @@ interface DeFiRecommendation {
     action: 'ENTER' | 'WAIT';
 }
 
-async function analyzeDeFi(usdcBalance: number): Promise<DeFiRecommendation> {
+async function analyzeDeFi(usdcBalance: number, xautBalance: number, wbtcBalance: number): Promise<DeFiRecommendation> {
     const genAI = new GoogleGenerativeAI(
         process.env.NEXT_PUBLIC_GEMINI_API_KEY || ''
     );
@@ -125,14 +55,20 @@ async function analyzeDeFi(usdcBalance: number): Promise<DeFiRecommendation> {
         generationConfig: { temperature: 0.7, maxOutputTokens: 512 },
     });
 
-    const prompt = `You are a DeFi yield advisor. The user has $${usdcBalance.toFixed(2)} USDC on Monad mainnet and wants to maximise yield while keeping exposure to BTC or tokenised gold (XAUt0).
+    const prompt = `You are a DeFi yield advisor. User balances on Monad mainnet:
+- USDC: $${usdcBalance.toFixed(2)}
+- XAUt0 (tokenised gold): ${xautBalance.toFixed(6)}
+- WBTC: ${wbtcBalance.toFixed(8)}
 
-Available protocols:
-${PROTOCOLS.map(p => `- ${p.name} (id: ${p.id}): APY ${p.apy}%, risk: ${p.risk}, assets: ${p.assets.join('/')}, TVL: ${p.tvl}`).join('\n')}
+Available DeFi protocols:
+${DEFI_PROTOCOLS.map(p => `- ${p.name} (id: ${p.id}): APY ${p.apy}%, risk: ${p.risk}, deposit: ${p.depositAsset}, TVL: ${p.tvl}`).join('\n')}
+
+Flow: user swaps USDC → target asset (XAUt0 or WBTC) via LiFi if needed, then deposits into the protocol vault.
+If user already holds the target asset, they skip the swap.
 
 Analyse risk-adjusted yield and recommend ONE protocol. Respond ONLY in valid JSON (no markdown):
 {
-  "protocolId": "<one of: kuru|neverland|ambient|morpho>",
+  "protocolId": "<one of: kuru-xaut|neverland-xaut|ambient-wbtc|morpho-wbtc>",
   "reason": "<1-2 sentence explanation>",
   "confidence": <50-95>,
   "action": "ENTER" or "WAIT"
@@ -144,12 +80,31 @@ Analyse risk-adjusted yield and recommend ONE protocol. Respond ONLY in valid JS
     if (!match) throw new Error('No JSON in AI response');
     const rec = JSON.parse(match[0]) as DeFiRecommendation;
     return {
-        protocolId: PROTOCOLS.find(p => p.id === rec.protocolId) ? rec.protocolId : PROTOCOLS[0].id,
+        protocolId: DEFI_PROTOCOLS.find(p => p.id === rec.protocolId) ? rec.protocolId : DEFI_PROTOCOLS[0].id,
         reason: rec.reason ?? '',
         confidence: Math.min(95, Math.max(50, rec.confidence ?? 70)),
         action: rec.action === 'WAIT' ? 'WAIT' : 'ENTER',
     };
 }
+
+// ─── Style maps ──────────────────────────────────────────────────────────────
+
+const RISK_STYLE = {
+    low:    { cls: 'bg-info-soft text-[var(--info)]',       label: 'Low Risk' },
+    medium: { cls: 'bg-warning-soft text-[var(--warning)]', label: 'Med Risk' },
+    high:   { cls: 'bg-destructive/10 text-destructive',    label: 'High Risk' },
+};
+
+// ─── Per-protocol execution state ────────────────────────────────────────────
+
+interface ExecState {
+    phase: 'idle' | 'swapping' | 'depositing' | 'done' | 'error';
+    step1Hash: string | null;
+    step2Hash: string | null;
+    error: string | null;
+}
+
+const IDLE_STATE: ExecState = { phase: 'idle', step1Hash: null, step2Hash: null, error: null };
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
@@ -159,38 +114,61 @@ export default function DeFiPage() {
     const { wallets } = useWallets();
 
     const [usdcBalance, setUsdcBalance] = useState(0);
-    const [selectedId, setSelectedId] = useState<string | null>(null);
-    const [amount, setAmount] = useState('');
-    const [quote, setQuote] = useState<Awaited<ReturnType<typeof getMonadSwapQuote>>>(null);
-    const [quoteLoading, setQuoteLoading] = useState(false);
-    const [executing, setExecuting] = useState(false);
-    const [txHash, setTxHash] = useState<string | null>(null);
-    const [txError, setTxError] = useState<string | null>(null);
+    const [xautBalance, setXautBalance] = useState(0);
+    const [wbtcBalance, setWbtcBalance] = useState(0);
 
-    const [analyzing, setAnalyzing] = useState(false);
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [amount, setAmount]         = useState('');
+    const [useOwnToken, setUseOwnToken] = useState(false); // skip swap if user has token
+
+    const [quote, setQuote]           = useState<Awaited<ReturnType<typeof getMonadSwapQuote>>>(null);
+    const [quoteLoading, setQuoteLoading] = useState(false);
+
+    const [execState, setExecState]   = useState<ExecState>(IDLE_STATE);
+
+    const [analyzing, setAnalyzing]   = useState(false);
     const [recommendation, setRecommendation] = useState<DeFiRecommendation | null>(null);
     const [autoRunning, setAutoRunning] = useState(false);
 
     const walletAddress = user?.wallet?.address;
-    const activeWallet = wallets.find(w => w.walletClientType === 'privy') || wallets[0];
+    const activeWallet  = wallets.find(w => w.walletClientType === 'privy') || wallets[0];
+    const selected      = DEFI_PROTOCOLS.find(p => p.id === selectedId) ?? null;
+    const parsedAmount  = parseFloat(amount) || 0;
 
-    const selected = PROTOCOLS.find(p => p.id === selectedId) ?? null;
-    const parsedAmount = parseFloat(amount) || 0;
+    const tokenBalance = (proto: DeFiProtocol) =>
+        proto.depositAsset === 'XAUt0' ? xautBalance : wbtcBalance;
 
     // Redirect if not authed
     useEffect(() => {
         if (ready && !authenticated) router.push('/');
     }, [ready, authenticated, router]);
 
-    // Load USDC balance
-    useEffect(() => {
+    // Load balances
+    const refreshBalances = useCallback(() => {
         if (!walletAddress) return;
-        getUserBalances(walletAddress).then(b => setUsdcBalance(b.usdc)).catch(() => {});
+        getUserBalances(walletAddress).then(b => {
+            setUsdcBalance(b.usdc);
+            setXautBalance(b.xaut);
+            setWbtcBalance(b.wbtc);
+        }).catch(() => {});
     }, [walletAddress]);
 
-    // Get LiFi quote when amount + protocol change
+    useEffect(() => { refreshBalances(); }, [refreshBalances]);
+
+    // When protocol changes, decide whether to default to "own token" mode
     useEffect(() => {
-        if (!selected || parsedAmount <= 0 || !walletAddress) {
+        if (!selected) return;
+        const bal = tokenBalance(selected);
+        setUseOwnToken(bal > 0.000001);
+        setAmount('');
+        setQuote(null);
+        setExecState(IDLE_STATE);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedId]);
+
+    // LiFi quote (only when swapping USDC → target)
+    useEffect(() => {
+        if (!selected || useOwnToken || parsedAmount <= 0 || !walletAddress) {
             setQuote(null);
             return;
         }
@@ -202,7 +180,7 @@ export default function DeFiPage() {
                 const fromAmount = ethers.parseUnits(parsedAmount.toFixed(6), 6).toString();
                 const q = await getMonadSwapQuote({
                     fromToken: MONAD_TOKENS.USDC.address,
-                    toToken: selected.toToken,
+                    toToken:   selected.depositToken.address,
                     fromAmount,
                     fromAddress: walletAddress,
                 });
@@ -213,9 +191,9 @@ export default function DeFiPage() {
         }, 600);
 
         return () => { cancelled = true; clearTimeout(handle); setQuoteLoading(false); };
-    }, [selected, parsedAmount, walletAddress]);
+    }, [selected, useOwnToken, parsedAmount, walletAddress]);
 
-    // Get signer with chain switch
+    // Signer with chain switch
     const getSigner = useCallback(async (): Promise<ethers.Signer> => {
         if (!activeWallet) throw new Error('No wallet connected');
         const provider = await activeWallet.getEthereumProvider();
@@ -245,95 +223,123 @@ export default function DeFiPage() {
         return new ethers.BrowserProvider(provider).getSigner();
     }, [activeWallet]);
 
-    // Execute stake (swap USDC → protocol asset via LiFi)
-    const handleStake = useCallback(async (proto: Protocol, q: typeof quote) => {
-        if (!q || parsedAmount <= 0) return;
-        setExecuting(true);
-        setTxError(null);
-        setTxHash(null);
-        try {
-            const signer = await getSigner();
-            const result = await executeMonadSwap(signer, q);
-            setTxHash(result.txHash);
+    // ── Main execution: swap (optional) + deposit ──────────────────────────
+    const handleStakeAndDeposit = useCallback(async (proto: DeFiProtocol) => {
+        if (parsedAmount <= 0) return;
+        setExecState(IDLE_STATE);
+
+        const signer = await getSigner();
+        const owner  = walletAddress!;
+
+        let acquiredAmount: bigint;
+        let step1Hash: string | null = null;
+
+        if (!useOwnToken) {
+            // ── Step 1: Swap USDC → target asset via LiFi ─────────────────
+            setExecState(s => ({ ...s, phase: 'swapping' }));
+
+            const fromAmountRaw = ethers.parseUnits(parsedAmount.toFixed(6), 6).toString();
+            const q = quote ?? await getMonadSwapQuote({
+                fromToken:   MONAD_TOKENS.USDC.address,
+                toToken:     proto.depositToken.address,
+                fromAmount:  fromAmountRaw,
+                fromAddress: owner,
+            });
+            if (!q) throw new Error('No LiFi quote available');
+
+            const swapResult = await executeMonadSwap(signer, q);
+            step1Hash = swapResult.txHash;
 
             addSwapRecord({
-                id: `defi-${Date.now()}`,
-                fromToken: MONAD_TOKENS.USDC.address,
+                id:              `defi-swap-${Date.now()}`,
+                fromToken:       MONAD_TOKENS.USDC.address,
                 fromTokenSymbol: 'USDC',
-                toToken: proto.toToken,
-                toTokenSymbol: proto.toSymbol,
-                fromAmount: ethers.parseUnits(parsedAmount.toFixed(6), 6).toString(),
+                toToken:         proto.depositToken.address,
+                toTokenSymbol:   proto.depositToken.symbol,
+                fromAmount:      fromAmountRaw,
                 fromAmountHuman: parsedAmount,
-                toAmount: q.toAmount,
-                toAmountHuman: Number(ethers.formatUnits(q.toAmount, proto.toDecimals)),
-                txHash: result.txHash,
-                toolUsed: `${proto.name} via LiFi`,
-                timestamp: Date.now(),
-                status: 'completed',
+                toAmount:        q.toAmount,
+                toAmountHuman:   Number(ethers.formatUnits(q.toAmount, proto.depositToken.decimals)),
+                txHash:          step1Hash,
+                toolUsed:        `${proto.name} via LiFi`,
+                timestamp:       Date.now(),
+                status:          'completed',
             });
 
-            // Refresh balance
-            if (walletAddress) getUserBalances(walletAddress).then(b => setUsdcBalance(b.usdc)).catch(() => {});
-        } catch (err) {
-            setTxError(err instanceof Error ? err.message : 'Transaction failed');
-        } finally {
-            setExecuting(false);
+            acquiredAmount = BigInt(q.toAmount);
+            setExecState(s => ({ ...s, phase: 'depositing', step1Hash }));
+        } else {
+            // User already holds the target asset — skip swap
+            acquiredAmount = ethers.parseUnits(parsedAmount.toFixed(proto.depositToken.decimals), proto.depositToken.decimals);
+            setExecState(s => ({ ...s, phase: 'depositing' }));
         }
-    }, [getSigner, parsedAmount, walletAddress]);
+
+        // ── Step 2: Deposit into protocol vault ────────────────────────────
+        let step2Hash: string | null = null;
+
+        if (proto.contractAddress) {
+            const result = await depositToProtocol(signer, proto, acquiredAmount);
+            step2Hash = result.txHash;
+        }
+        // If contractAddress is null, we skip the on-chain deposit.
+        // The UI will show the website link so the user can do it manually.
+
+        setExecState({ phase: 'done', step1Hash, step2Hash, error: null });
+        refreshBalances();
+    }, [getSigner, parsedAmount, quote, useOwnToken, walletAddress, refreshBalances]);
+
+    const handleExecute = useCallback(async (proto: DeFiProtocol) => {
+        try {
+            await handleStakeAndDeposit(proto);
+        } catch (err) {
+            setExecState(s => ({
+                ...s,
+                phase: 'error',
+                error: err instanceof Error ? err.message : 'Transaction failed',
+            }));
+        }
+    }, [handleStakeAndDeposit]);
 
     // AI analysis
     const handleAnalyze = async () => {
         setAnalyzing(true);
         setRecommendation(null);
         try {
-            const rec = await analyzeDeFi(usdcBalance);
+            const rec = await analyzeDeFi(usdcBalance, xautBalance, wbtcBalance);
             setRecommendation(rec);
-            // Auto-select recommended protocol
             if (rec.action === 'ENTER') setSelectedId(rec.protocolId);
         } catch {
-            setRecommendation({
-                protocolId: 'kuru',
-                reason: 'AI unavailable. Showing highest APY option.',
-                confidence: 60,
-                action: 'ENTER',
-            });
-            setSelectedId('kuru');
+            const fallback = DEFI_PROTOCOLS[0];
+            setRecommendation({ protocolId: fallback.id, reason: 'AI unavailable — showing highest APY.', confidence: 60, action: 'ENTER' });
+            setSelectedId(fallback.id);
         } finally {
             setAnalyzing(false);
         }
     };
 
-    // Auto execute — pick recommended (or highest APY) with 10% of balance
+    // Auto: pick recommended (or highest APY), use 10% of USDC balance
     const handleAuto = async () => {
         if (!walletAddress || usdcBalance <= 0) return;
         setAutoRunning(true);
-        setTxError(null);
-
         try {
-            // Pick protocol
             const proto = recommendation?.action === 'ENTER'
-                ? (PROTOCOLS.find(p => p.id === recommendation.protocolId) ?? PROTOCOLS[0])
-                : PROTOCOLS[0];
+                ? (DEFI_PROTOCOLS.find(p => p.id === recommendation.protocolId) ?? DEFI_PROTOCOLS[0])
+                : DEFI_PROTOCOLS[0];
 
             const autoAmount = Math.max(1, Math.floor(usdcBalance * 0.1 * 100) / 100);
-            const fromAmount = ethers.parseUnits(autoAmount.toFixed(6), 6).toString();
-
-            const q = await getMonadSwapQuote({
-                fromToken: MONAD_TOKENS.USDC.address,
-                toToken: proto.toToken,
-                fromAmount,
-                fromAddress: walletAddress,
-            });
-
-            if (!q) throw new Error('Could not get quote');
-
             setSelectedId(proto.id);
+            setUseOwnToken(false);
             setAmount(autoAmount.toString());
-            setQuote(q);
 
-            await handleStake(proto, q);
+            // Small delay so state settles, then execute
+            await new Promise(r => setTimeout(r, 100));
+            await handleExecute(proto);
         } catch (err) {
-            setTxError(err instanceof Error ? err.message : 'Auto failed');
+            setExecState(s => ({
+                ...s,
+                phase: 'error',
+                error: err instanceof Error ? err.message : 'Auto failed',
+            }));
         } finally {
             setAutoRunning(false);
         }
@@ -347,9 +353,11 @@ export default function DeFiPage() {
         );
     }
 
+    const isExecuting = execState.phase === 'swapping' || execState.phase === 'depositing';
+
     return (
         <MobileLayout activeTab="pay">
-            {/* Header */}
+            {/* ── Header ─────────────────────────────────────────────────── */}
             <div className="bg-background sticky top-0 z-40 px-4 pt-12 pb-3 border-b border-border">
                 <div className="flex items-center gap-3 mb-3">
                     <button onClick={() => router.push('/dashboard')} className="p-2 rounded-full bg-muted hover:bg-secondary transition-colors">
@@ -357,9 +365,22 @@ export default function DeFiPage() {
                     </button>
                     <div className="flex-1">
                         <h1 className="text-xl font-semibold">DeFi Yield</h1>
-                        <p className="text-xs text-muted-foreground">
-                            Balance: <span className="font-medium text-foreground">${usdcBalance.toFixed(2)} USDC</span>
-                        </p>
+                        {/* Balance row */}
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5">
+                            <span className="text-xs text-muted-foreground">
+                                USDC <span className="font-medium text-foreground">${usdcBalance.toFixed(2)}</span>
+                            </span>
+                            {xautBalance > 0.000001 && (
+                                <span className="text-xs text-muted-foreground">
+                                    XAUt0 <span className="font-medium text-foreground">{xautBalance.toFixed(4)}</span>
+                                </span>
+                            )}
+                            {wbtcBalance > 0.000001 && (
+                                <span className="text-xs text-muted-foreground">
+                                    WBTC <span className="font-medium text-foreground">{wbtcBalance.toFixed(6)}</span>
+                                </span>
+                            )}
+                        </div>
                     </div>
                 </div>
 
@@ -400,10 +421,10 @@ export default function DeFiPage() {
                             <div className="flex items-center gap-2 mb-1">
                                 <span className={`text-sm font-semibold ${recommendation.action === 'ENTER' ? 'text-primary' : 'text-[var(--warning)]'}`}>
                                     {recommendation.action === 'ENTER'
-                                        ? `AI: Enter ${PROTOCOLS.find(p => p.id === recommendation.protocolId)?.name}`
+                                        ? `AI Pick: ${DEFI_PROTOCOLS.find(p => p.id === recommendation.protocolId)?.name}`
                                         : 'AI: Wait for better opportunity'}
                                 </span>
-                                <span className="text-xs text-muted-foreground">{recommendation.confidence}% confident</span>
+                                <span className="text-xs text-muted-foreground">{recommendation.confidence}%</span>
                             </div>
                             <p className="text-xs text-muted-foreground leading-relaxed">{recommendation.reason}</p>
                         </div>
@@ -412,30 +433,41 @@ export default function DeFiPage() {
 
                 {/* Protocol list */}
                 <div className="space-y-2">
-                    {PROTOCOLS.map(proto => {
-                        const risk = RISK_STYLE[proto.risk];
-                        const isSelected = selectedId === proto.id;
-                        const isRecommended = recommendation?.protocolId === proto.id && recommendation.action === 'ENTER';
+                    {DEFI_PROTOCOLS.map(proto => {
+                        const risk        = RISK_STYLE[proto.risk];
+                        const isSelected  = selectedId === proto.id;
+                        const isRec       = recommendation?.protocolId === proto.id && recommendation.action === 'ENTER';
+                        const tokenBal    = tokenBalance(proto);
+                        const hasToken    = tokenBal > 0.000001;
+                        const state       = isSelected ? execState : IDLE_STATE;
 
                         return (
                             <div key={proto.id} className={`ios-card overflow-hidden transition-all ${isSelected ? 'ring-2 ring-primary/40' : ''}`}>
                                 {/* Protocol row */}
                                 <button
                                     className="w-full flex items-center gap-3 p-4 hover:bg-muted/40 transition-colors text-left"
-                                    onClick={() => setSelectedId(isSelected ? null : proto.id)}
+                                    onClick={() => {
+                                        setSelectedId(isSelected ? null : proto.id);
+                                        if (!isSelected) setExecState(IDLE_STATE);
+                                    }}
                                 >
                                     <span className="text-2xl">{proto.icon}</span>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <span className="font-semibold">{proto.name}</span>
-                                            {isRecommended && (
-                                                <span className="text-xs px-1.5 py-0.5 rounded-full bg-primary text-white font-medium">AI Pick</span>
+                                            {isRec && (
+                                                <span className="text-xs px-1.5 py-0.5 rounded-full bg-primary text-white font-medium">AI</span>
                                             )}
                                             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${risk.cls}`}>{risk.label}</span>
                                         </div>
                                         <div className="flex items-center gap-3 mt-0.5">
-                                            <span className="text-sm text-muted-foreground">{proto.assets.join(' · ')}</span>
+                                            <span className="text-sm text-muted-foreground">{proto.depositAsset}</span>
                                             <span className="text-xs text-muted-foreground">TVL {proto.tvl}</span>
+                                            {hasToken && (
+                                                <span className="text-xs text-[var(--success)] font-medium">
+                                                    Have {tokenBal.toFixed(4)}
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
                                     <div className="text-right shrink-0">
@@ -445,90 +477,192 @@ export default function DeFiPage() {
                                     <ChevronRight className={`w-4 h-4 text-muted-foreground transition-transform ${isSelected ? 'rotate-90' : ''}`} />
                                 </button>
 
-                                {/* Expanded stake panel */}
+                                {/* Expanded panel */}
                                 {isSelected && (
-                                    <div className="px-4 pb-4 space-y-3 border-t border-border pt-3">
+                                    <div className="px-4 pb-4 border-t border-border pt-3 space-y-4">
                                         <p className="text-xs text-muted-foreground leading-relaxed">{proto.desc}</p>
 
+                                        {/* 2-step flow diagram */}
+                                        <div className="flex items-center gap-2 text-xs">
+                                            <div className={`flex-1 rounded-lg p-2 text-center font-medium ${!useOwnToken ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground line-through'}`}>
+                                                Step 1<br />
+                                                <span className="font-normal">USDC → {proto.depositAsset}</span><br />
+                                                <span className="opacity-70">via LiFi</span>
+                                            </div>
+                                            <ArrowRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                                            <div className={`flex-1 rounded-lg p-2 text-center font-medium ${proto.contractAddress ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+                                                Step 2<br />
+                                                <span className="font-normal">{proto.depositAsset} → Vault</span><br />
+                                                <span className="opacity-70">{proto.contractAddress ? 'on-chain' : 'via website'}</span>
+                                            </div>
+                                        </div>
+
+                                        {/* Skip swap toggle (if user has token) */}
+                                        {hasToken && (
+                                            <div className="flex items-center gap-2 bg-muted rounded-xl p-3">
+                                                <Coins className="w-4 h-4 text-[var(--success)] shrink-0" />
+                                                <p className="text-xs flex-1">
+                                                    You already have <strong>{tokenBal.toFixed(4)} {proto.depositAsset}</strong>
+                                                </p>
+                                                <button
+                                                    onClick={() => { setUseOwnToken(!useOwnToken); setAmount(''); }}
+                                                    className={`text-xs px-2 py-1 rounded-lg font-medium transition-colors ${
+                                                        useOwnToken
+                                                            ? 'bg-primary text-white'
+                                                            : 'bg-background border border-border'
+                                                    }`}
+                                                >
+                                                    {useOwnToken ? 'Use my token' : 'Buy with USDC'}
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {/* Amount input */}
                                         <div className="space-y-2">
-                                            <label className="text-sm font-medium">Amount (USDC)</label>
+                                            <label className="text-sm font-medium">
+                                                {useOwnToken
+                                                    ? `Amount (${proto.depositAsset})`
+                                                    : 'Amount (USDC)'}
+                                            </label>
                                             <div className="flex gap-2">
                                                 <Input
                                                     type="number"
                                                     placeholder="0.00"
                                                     value={amount}
-                                                    onChange={e => { setAmount(e.target.value); setTxHash(null); setTxError(null); }}
+                                                    onChange={e => { setAmount(e.target.value); setExecState(IDLE_STATE); }}
                                                     className="rounded-xl py-5 text-lg font-semibold flex-1"
-                                                    disabled={executing}
+                                                    disabled={isExecuting}
                                                 />
                                                 <button
-                                                    onClick={() => setAmount((usdcBalance * 0.5).toFixed(2))}
+                                                    onClick={() => setAmount(
+                                                        useOwnToken
+                                                            ? (tokenBal * 0.5).toFixed(6)
+                                                            : (usdcBalance * 0.5).toFixed(2)
+                                                    )}
                                                     className="px-3 py-2 rounded-xl bg-muted text-xs font-medium hover:bg-secondary transition-colors"
                                                 >50%</button>
                                                 <button
-                                                    onClick={() => setAmount(usdcBalance.toFixed(2))}
+                                                    onClick={() => setAmount(
+                                                        useOwnToken
+                                                            ? tokenBal.toFixed(6)
+                                                            : usdcBalance.toFixed(2)
+                                                    )}
                                                     className="px-3 py-2 rounded-xl bg-muted text-xs font-medium hover:bg-secondary transition-colors"
                                                 >Max</button>
                                             </div>
                                         </div>
 
-                                        {/* Quote preview */}
-                                        {quoteLoading && (
-                                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                                <Loader2 className="w-4 h-4 animate-spin" /> Getting quote…
+                                        {/* LiFi quote preview (swap step only) */}
+                                        {!useOwnToken && (
+                                            <>
+                                                {quoteLoading && (
+                                                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                                        <Loader2 className="w-4 h-4 animate-spin" /> Getting quote…
+                                                    </div>
+                                                )}
+                                                {quote && !quoteLoading && (
+                                                    <div className="bg-muted rounded-xl p-3 space-y-1 text-sm">
+                                                        <div className="flex justify-between">
+                                                            <span className="text-muted-foreground">Step 1 output</span>
+                                                            <span className="font-semibold">
+                                                                {Number(ethers.formatUnits(quote.toAmount, proto.depositToken.decimals)).toFixed(6)} {proto.depositAsset}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex justify-between text-xs text-muted-foreground">
+                                                            <span>Via {quote.toolUsed}</span>
+                                                            <span>Fee ${quote.feeUSD.toFixed(4)}</span>
+                                                        </div>
+                                                        <p className="text-xs text-muted-foreground pt-1 border-t border-border">
+                                                            Step 2: {Number(ethers.formatUnits(quote.toAmount, proto.depositToken.decimals)).toFixed(6)} {proto.depositAsset} → {proto.name} vault
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
+
+                                        {/* Execution progress */}
+                                        {state.phase !== 'idle' && state.phase !== 'error' && (
+                                            <div className="space-y-1.5">
+                                                <StepRow
+                                                    n={1}
+                                                    label={useOwnToken ? 'Skipped (using own token)' : 'Swap USDC → ' + proto.depositAsset}
+                                                    done={state.step1Hash !== null || useOwnToken}
+                                                    active={state.phase === 'swapping'}
+                                                    hash={state.step1Hash}
+                                                    skipped={useOwnToken}
+                                                />
+                                                <StepRow
+                                                    n={2}
+                                                    label={'Deposit ' + proto.depositAsset + ' → ' + proto.name}
+                                                    done={state.step2Hash !== null || (state.phase === 'done' && !proto.contractAddress)}
+                                                    active={state.phase === 'depositing'}
+                                                    hash={state.step2Hash}
+                                                    skipped={false}
+                                                />
                                             </div>
                                         )}
-                                        {quote && !quoteLoading && (
-                                            <div className="bg-muted rounded-xl p-3 space-y-1 text-sm">
-                                                <div className="flex justify-between">
-                                                    <span className="text-muted-foreground">You receive</span>
-                                                    <span className="font-semibold">
-                                                        {Number(ethers.formatUnits(quote.toAmount, proto.toDecimals)).toFixed(6)} {proto.toSymbol}
-                                                    </span>
-                                                </div>
-                                                <div className="flex justify-between text-xs text-muted-foreground">
-                                                    <span>Via {quote.toolUsed}</span>
-                                                    <span>Fee ${quote.feeUSD.toFixed(4)}</span>
+
+                                        {/* Done state */}
+                                        {state.phase === 'done' && (
+                                            <div className="flex items-start gap-2 text-sm bg-success-soft text-[var(--success)] rounded-xl p-3">
+                                                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                                                <div className="flex-1">
+                                                    <p className="font-medium">
+                                                        {proto.contractAddress ? 'Staked successfully!' : 'Swap complete!'}
+                                                    </p>
+                                                    {!proto.contractAddress && (
+                                                        <a
+                                                            href={proto.websiteUrl}
+                                                            target="_blank" rel="noopener noreferrer"
+                                                            className="text-xs flex items-center gap-1 mt-1 hover:underline"
+                                                        >
+                                                            Deposit {proto.depositAsset} at {proto.name}
+                                                            <ExternalLink className="w-3 h-3" />
+                                                        </a>
+                                                    )}
                                                 </div>
                                             </div>
                                         )}
 
-                                        {/* Tx result */}
-                                        {txHash && (
-                                            <div className="flex items-center gap-2 text-sm bg-success-soft text-[var(--success)] rounded-xl p-3">
-                                                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                                                <div className="flex-1 min-w-0">
-                                                    <span className="font-medium">Staked successfully</span>
-                                                    <a
-                                                        href={`${EXPLORER_URL}/tx/${txHash}`}
-                                                        target="_blank" rel="noopener noreferrer"
-                                                        className="flex items-center gap-1 text-xs mt-0.5 hover:underline"
-                                                    >
-                                                        {txHash.slice(0, 10)}…{txHash.slice(-6)}
-                                                        <ExternalLink className="w-3 h-3" />
-                                                    </a>
-                                                </div>
-                                            </div>
-                                        )}
-                                        {txError && (
-                                            <div className="flex items-start gap-2 text-sm bg-destructive-soft text-[var(--destructive)] rounded-xl p-3">
+                                        {/* Error state */}
+                                        {state.phase === 'error' && (
+                                            <div className="flex items-start gap-2 text-sm bg-destructive/10 text-destructive rounded-xl p-3">
                                                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                                                <p className="flex-1 break-all">{txError}</p>
+                                                <p className="flex-1 break-all">{state.error}</p>
                                             </div>
                                         )}
 
+                                        {/* Execute button */}
                                         <button
-                                            onClick={() => { if (quote) handleStake(proto, quote); }}
-                                            disabled={!quote || parsedAmount <= 0 || executing || parsedAmount > usdcBalance}
+                                            onClick={() => handleExecute(proto)}
+                                            disabled={
+                                                parsedAmount <= 0 ||
+                                                isExecuting ||
+                                                (!useOwnToken && !quote && parsedAmount > 0) ||
+                                                (!useOwnToken && parsedAmount > usdcBalance) ||
+                                                (useOwnToken && parsedAmount > tokenBal)
+                                            }
                                             className="w-full py-3.5 rounded-2xl font-semibold text-sm flex items-center justify-center gap-2 bg-primary text-white disabled:opacity-50 transition-all active:scale-[0.98]"
                                         >
-                                            {executing
-                                                ? <><Loader2 className="w-4 h-4 animate-spin" /> Staking…</>
-                                                : parsedAmount > usdcBalance
-                                                    ? 'Insufficient USDC'
-                                                    : !quote && parsedAmount > 0
-                                                        ? <><Loader2 className="w-4 h-4 animate-spin" /> Getting quote…</>
-                                                        : <><TrendingUp className="w-4 h-4" /> Stake ${parsedAmount > 0 ? parsedAmount.toFixed(2) : '0.00'} → {proto.toSymbol}</>}
+                                            {isExecuting ? (
+                                                <>
+                                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                                    {execState.phase === 'swapping' ? 'Swapping…' : 'Depositing…'}
+                                                </>
+                                            ) : !useOwnToken && !quote && parsedAmount > 0 ? (
+                                                <><Loader2 className="w-4 h-4 animate-spin" /> Getting quote…</>
+                                            ) : !useOwnToken && parsedAmount > usdcBalance ? (
+                                                'Insufficient USDC'
+                                            ) : useOwnToken && parsedAmount > tokenBal ? (
+                                                `Insufficient ${proto.depositAsset}`
+                                            ) : (
+                                                <>
+                                                    <TrendingUp className="w-4 h-4" />
+                                                    {useOwnToken
+                                                        ? `Deposit ${parsedAmount > 0 ? parsedAmount.toFixed(6) : '0'} ${proto.depositAsset}`
+                                                        : `Swap + Stake $${parsedAmount > 0 ? parsedAmount.toFixed(2) : '0'} → ${proto.depositAsset}`}
+                                                </>
+                                            )}
                                         </button>
                                     </div>
                                 )}
@@ -536,8 +670,44 @@ export default function DeFiPage() {
                         );
                     })}
                 </div>
-
             </div>
         </MobileLayout>
+    );
+}
+
+// ─── Step progress row ────────────────────────────────────────────────────────
+
+function StepRow({
+    n, label, done, active, hash, skipped,
+}: {
+    n: number;
+    label: string;
+    done: boolean;
+    active: boolean;
+    hash: string | null;
+    skipped: boolean;
+}) {
+    return (
+        <div className={`flex items-center gap-2 text-xs ${skipped ? 'opacity-40' : ''}`}>
+            <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] ${
+                done    ? 'bg-[var(--success)] text-white' :
+                active  ? 'bg-primary text-white' :
+                          'bg-muted text-muted-foreground'
+            }`}>
+                {done ? '✓' : active ? <Loader2 className="w-3 h-3 animate-spin" /> : n}
+            </div>
+            <span className={`flex-1 ${done ? 'text-[var(--success)]' : active ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {label}
+            </span>
+            {hash && (
+                <a
+                    href={`${EXPLORER_URL}/tx/${hash}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-0.5 text-muted-foreground hover:text-foreground"
+                >
+                    {hash.slice(0, 6)}…<ExternalLink className="w-2.5 h-2.5" />
+                </a>
+            )}
+        </div>
     );
 }
