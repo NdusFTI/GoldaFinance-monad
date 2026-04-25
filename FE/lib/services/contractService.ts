@@ -124,12 +124,16 @@ export const CONTRACT_ABIS = {
 // ============================================
 // RPC Provider (singleton for reads)
 // ============================================
-// IMPORTANT: ethers v6 batches concurrent calls into a single JSON-RPC array
-// request by default (batchMaxCount=100). The public Monad RPC sometimes
-// fails the whole batch with `error.data = null`, which surfaces as
-// `CALL_EXCEPTION ... missing revert data` for every read in the batch even
-// though each individual call would succeed. We disable batching to keep
-// reads independent and add a tiny retry around the contract calls below.
+// Public Monad RPCs (especially testnet) rate-limit aggressively. We mitigate
+// pressure on three fronts:
+//  1. JSON-RPC batching — ethers v6 collapses multiple concurrent eth_call
+//     requests into a single array request. We keep batches small (≤5) so
+//     a single bad batch doesn't poison everything but most concurrent
+//     reads still merge into one HTTP request.
+//  2. In-memory cache (`cached()` below) — same call within READ_TTL_MS is
+//     served from memory. Page navigation, re-renders, and parallel hook
+//     instances reuse one network round-trip.
+//  3. Retry with exponential backoff for transient failures (`withRetry()`).
 
 let _readProvider: ethers.JsonRpcProvider | null = null;
 
@@ -138,10 +142,55 @@ function readProvider(): ethers.JsonRpcProvider {
     const network = ethers.Network.from(CHAIN_ID);
     _readProvider = new ethers.JsonRpcProvider(RPC_URL, network, {
       staticNetwork: network, // pin to chain, no auto-detection
-      batchMaxCount: 1,       // disable JSON-RPC batching (Monad RPC quirk)
+      batchMaxCount: 5,       // small batches: consolidate without big-batch failures
+      batchStallTime: 20,     // ms — collect concurrent calls before sending
     });
   }
   return _readProvider;
+}
+
+// ----------------------------------------------------------------------------
+// Read cache (TTL-based)
+// ----------------------------------------------------------------------------
+// Repeated reads of the same key within the TTL are served from memory.
+// The cache is shared across all consumers in the same JS runtime (browser
+// tab or server process), so multiple pages / hooks mounting concurrently
+// only trigger one round-trip per key.
+
+const READ_TTL_MS = 8000;
+const _cache = new Map<string, { value: unknown; expiresAt: number }>();
+const _inflight = new Map<string, Promise<unknown>>();
+
+async function cached<T>(
+  key: string,
+  fn: () => Promise<T>,
+  ttl = READ_TTL_MS,
+): Promise<T> {
+  const now = Date.now();
+
+  const hit = _cache.get(key);
+  if (hit && hit.expiresAt > now) return hit.value as T;
+
+  // De-dupe concurrent callers asking for the same key.
+  const pending = _inflight.get(key) as Promise<T> | undefined;
+  if (pending) return pending;
+
+  const promise = (async () => {
+    try {
+      const value = await fn();
+      _cache.set(key, { value, expiresAt: Date.now() + ttl });
+      return value;
+    } finally {
+      _inflight.delete(key);
+    }
+  })();
+  _inflight.set(key, promise);
+  return promise;
+}
+
+/** Clear the read cache. Call after a successful write so the next read is fresh. */
+export function invalidateReadCache(): void {
+  _cache.clear();
 }
 
 /**
@@ -185,11 +234,11 @@ function usdcRead(provider: ethers.Provider) {
 export async function getUSDCBalance(userAddress: string): Promise<number> {
   return withRetry(
     "getUSDCBalance",
-    async () => {
+    () => cached(`usdc-balance:${userAddress}`, async () => {
       const usdc = usdcRead(readProvider());
       const bal: bigint = await usdc.balanceOf(userAddress);
       return Number(ethers.formatUnits(bal, USDC_DECIMALS));
-    },
+    }),
     0,
   );
 }
@@ -197,12 +246,12 @@ export async function getUSDCBalance(userAddress: string): Promise<number> {
 export async function getShareBalance(userAddress: string): Promise<number> {
   return withRetry(
     "getShareBalance",
-    async () => {
+    () => cached(`share-balance:${userAddress}`, async () => {
       const vault = vaultRead(readProvider());
       const bal: bigint = await vault.balanceOf(userAddress);
       // Vault shares use 18 decimals (confirmed on-chain).
       return Number(ethers.formatUnits(bal, VAULT_SHARE_DECIMALS));
-    },
+    }),
     0,
   );
 }
@@ -211,11 +260,11 @@ export async function getShareBalance(userAddress: string): Promise<number> {
 export async function getSharePrice(): Promise<number> {
   return withRetry(
     "getSharePrice",
-    async () => {
+    () => cached("share-price", async () => {
       const vault = vaultRead(readProvider());
       const price: bigint = await vault.sharePrice();
       return Number(ethers.formatUnits(price, USDC_DECIMALS));
-    },
+    }),
     1,
   );
 }
@@ -223,11 +272,11 @@ export async function getSharePrice(): Promise<number> {
 export async function getNAV(): Promise<number> {
   return withRetry(
     "getNAV",
-    async () => {
+    () => cached("vault-nav", async () => {
       const vault = vaultRead(readProvider());
       const nav: bigint = await vault.navUSDC();
       return Number(ethers.formatUnits(nav, USDC_DECIMALS));
-    },
+    }),
     0,
   );
 }
@@ -235,11 +284,11 @@ export async function getNAV(): Promise<number> {
 export async function getUSDCAllowance(userAddress: string): Promise<number> {
   return withRetry(
     "getUSDCAllowance",
-    async () => {
+    () => cached(`usdc-allowance:${userAddress}`, async () => {
       const usdc = usdcRead(readProvider());
       const allowance: bigint = await usdc.allowance(userAddress, VAULT_ADDRESS);
       return Number(ethers.formatUnits(allowance, USDC_DECIMALS));
-    },
+    }),
     0,
   );
 }
@@ -257,7 +306,7 @@ export async function getUserWithdrawals(
 ): Promise<WithdrawalView[]> {
   return withRetry(
     "getUserWithdrawals",
-    async () => {
+    () => cached(`withdrawals:${userAddress}`, async () => {
       const provider = readProvider();
       const vault = vaultRead(provider);
       const usdc = usdcRead(provider);
@@ -265,22 +314,22 @@ export async function getUserWithdrawals(
       const ids: bigint[] = await vault.userWithdrawals(userAddress);
       if (ids.length === 0) return [];
 
-      const vaultUsdcBalRaw: bigint = await usdc.balanceOf(VAULT_ADDRESS);
+      // Run vault USDC balance + per-id withdrawal lookups in parallel so
+      // they fold into the same JSON-RPC batch (batchMaxCount=5).
+      const [vaultUsdcBalRaw, ...withdrawalRows] = await Promise.all([
+        usdc.balanceOf(VAULT_ADDRESS),
+        ...ids.map(id => vault.withdrawals(id)),
+      ]);
+
       let vaultBal = Number(ethers.formatUnits(vaultUsdcBalRaw, USDC_DECIMALS));
 
-      const rows: WithdrawalView[] = [];
-      for (const idBn of ids) {
-        const id = Number(idBn);
-        const w = await vault.withdrawals(id);
-        const owed = Number(ethers.formatUnits(w.usdcOwed, USDC_DECIMALS));
-        rows.push({
-          id,
-          user: w.user as string,
-          usdcOwed: owed,
-          settled: w.settled as boolean,
-          claimable: false,
-        });
-      }
+      const rows: WithdrawalView[] = withdrawalRows.map((w, i) => ({
+        id: Number(ids[i]),
+        user: w.user as string,
+        usdcOwed: Number(ethers.formatUnits(w.usdcOwed, USDC_DECIMALS)),
+        settled: w.settled as boolean,
+        claimable: false,
+      }));
 
       // Mark claimable when the vault has enough liquid USDC, greedily
       // consumed in queue order for display purposes.
@@ -294,7 +343,7 @@ export async function getUserWithdrawals(
 
       // Newest first
       return rows.sort((a, b) => b.id - a.id);
-    },
+    }),
     [],
   );
 }
@@ -349,11 +398,11 @@ export async function getTokenBalance(
 ): Promise<number> {
   return withRetry(
     `getTokenBalance(${tokenAddress})`,
-    async () => {
+    () => cached(`token-balance:${tokenAddress}:${userAddress}`, async () => {
       const contract = new ethers.Contract(tokenAddress, ERC20_ABI, readProvider());
       const bal: bigint = await contract.balanceOf(userAddress);
       return Number(ethers.formatUnits(bal, decimals));
-    },
+    }),
     0,
   );
 }
@@ -374,6 +423,7 @@ export async function approveUSDC(
   const amountWei = ethers.parseUnits(usdcAmount.toString(), USDC_DECIMALS);
   const tx = await usdc.approve(VAULT_ADDRESS, amountWei);
   const receipt = await tx.wait();
+  invalidateReadCache();
   return { txHash: receipt.hash };
 }
 
@@ -389,6 +439,7 @@ export async function approveUSDCToLiFi(
   const usdc = new ethers.Contract(USDC_ADDRESS, ERC20_ABI, signer);
   const tx = await usdc.approve(CONTRACT_ADDRESSES.LIFI_DIAMOND, ethers.MaxUint256);
   const receipt = await tx.wait();
+  invalidateReadCache();
   return { txHash: receipt.hash };
 }
 
@@ -399,11 +450,11 @@ export async function approveUSDCToLiFi(
 export async function hasLiFiApproval(userAddress: string): Promise<boolean> {
   return withRetry(
     "hasLiFiApproval",
-    async () => {
+    () => cached(`lifi-approval:${userAddress}`, async () => {
       const usdc = usdcRead(readProvider());
       const allowance: bigint = await usdc.allowance(userAddress, CONTRACT_ADDRESSES.LIFI_DIAMOND);
       return allowance >= ethers.MaxUint256 / BigInt(2);
-    },
+    }),
     false,
   );
 }
@@ -426,6 +477,7 @@ export async function depositToVault(
 
   const tx = await vault.deposit(amountWei);
   const receipt = await tx.wait();
+  invalidateReadCache();
   return { txHash: receipt.hash };
 }
 
@@ -438,6 +490,7 @@ export async function requestWithdrawFromVault(
   const amountWei = ethers.parseUnits(shareAmount.toString(), VAULT_SHARE_DECIMALS);
   const tx = await vault.requestWithdraw(amountWei);
   const receipt = await tx.wait();
+  invalidateReadCache();
   return { txHash: receipt.hash };
 }
 
@@ -448,5 +501,6 @@ export async function claimWithdrawal(
   const vault = new ethers.Contract(VAULT_ADDRESS, GOLDA_VAULT_ABI, signer);
   const tx = await vault.claim(id);
   const receipt = await tx.wait();
+  invalidateReadCache();
   return { txHash: receipt.hash };
 }
