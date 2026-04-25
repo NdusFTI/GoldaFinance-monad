@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { ethers } from 'ethers';
 import { MobileLayout } from '@/components/mobile-layout';
+import { DetailPageSkeleton } from '@/components/skeleton';
 import { Input } from '@/components/ui/input';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import {
@@ -137,12 +138,6 @@ export default function DeFiPage() {
 
     const tokenBalance = (proto: DeFiProtocol) =>
         proto.depositAsset === 'XAUt0' ? xautBalance : wbtcBalance;
-
-    // Redirect if not authed
-    useEffect(() => {
-        if (typeof window === 'undefined') return;
-        window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-    }, [history]);
 
     // ---- Auth gate -----------------------------------------------------------
     useEffect(() => {
@@ -389,7 +384,6 @@ export default function DeFiPage() {
                             )}
                         </div>
                     </div>
-                    <StatusPill status={status} />
                 </div>
 
                 {/* Action bar */}
@@ -419,31 +413,6 @@ export default function DeFiPage() {
                 BODY
                 ============================================================ */}
             <div className="px-4 pb-5 space-y-4 animate-fade-in">
-                {/* HEADLINE STATS — proper raised cards (not inside the hero) */}
-                <div className="grid grid-cols-2 gap-3">
-                    <div className="ios-card-elev p-4">
-                        <p className="section-label mb-1">Total Stacked</p>
-                        <p className="text-title-1 font-num leading-tight">
-                            ${formatUSD(totalStacked)}
-                        </p>
-                        <p className="text-footnote text-muted-foreground mt-1 truncate">
-                            {history.length} stack{history.length === 1 ? '' : 's'}
-                            {totalShares > 0 && ` · ${totalShares.toFixed(4)} sh`}
-                        </p>
-                    </div>
-                    <div className="ios-card-elev p-4">
-                        <p className="section-label mb-1">Next Stack</p>
-                        <p className="text-title-1 font-num leading-tight">
-                            {countdown}
-                        </p>
-                        <p className="text-footnote text-muted-foreground mt-1 truncate">
-                            {settings.enabled
-                                ? `${labelFor(settings.frequency)} · $${formatUSD(settings.amountPerStack)}`
-                                : 'Auto-stacking is paused'}
-                        </p>
-                    </div>
-                </div>
-
                 {/* AI Recommendation banner */}
                 {recommendation && (
                     <div className={`ios-card p-4 flex gap-3 border ${
