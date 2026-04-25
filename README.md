@@ -1,11 +1,32 @@
-# Monad Blitz Delhi Submission Process
+# Golda Finance
 
-1. Visit the `monad-blitz-delhi` repo (link [here](https://github.com/monad-developers/monad-blitz-delhi)) and fork it.
+Golda Finance is a robust anti-inflation savings application built to protect and continuously grow capital.
 
-<img width="1512" alt="Screenshot 2025-06-05 at 1 47 48 PM" src="https://github.com/user-attachments/assets/a837398a-cca4-42cf-b6ff-709b567c9aa9" />
+Traditional savings accounts allow capital to remain idle, inevitably losing purchasing power to inflation over time. Golda Finance solves this by ensuring your money is always working. When users deposit funds, the capital is securely deployed into decentralized finance (DeFi) protocols to generate sustainable yield.
 
-2. Give it your project name, a one-liner description, make sure you are forking `main` branch and click `Create Fork`.
+### Core Mechanisms
 
-<img width="1512" alt="Screenshot 2025-06-05 at 1 48 10 PM" src="https://github.com/user-attachments/assets/62ea369a-de81-4460-8136-e3f9320abfb8" />
+* **Anti-Inflation Protection**
+  Deposits are structured to preserve purchasing power by maintaining exposure to yield-generating assets, effectively neutralizing the impact of inflation.
 
-3. In your fork you can make all the changes you want, add code of your project, create branches, add information to `README.md`, you can change anything and everything.
+* **Active Yield Generation**
+  Capital is never idle. The underlying architecture automatically routes deposited funds into thoroughly vetted DeFi strategies to maximize returns while managing risk.
+
+* **Frictionless Capital Management**
+  Users can deposit standard assets (such as USDC) and receive vault shares representing their position. Withdrawals can be requested and claimed seamlessly once liquidity is processed.
+
+### Deployment Information
+
+The protocol smart contracts are currently deployed and verified on the Monad Testnet.
+
+| Component | Contract Address |
+| --- | --- |
+| Golda Vault | `0xbf8f03002e91daacc8e3597d650a4f1b2d21a39e` |
+| USDC (Mock) | `0x754704Bc059F8C67012fEd69BC8A327a5aafb603` |
+
+### Network Configuration
+
+* **Network**: Monad Testnet
+* **Chain ID**: 10143
+* **RPC URL**: `https://testnet-rpc.monad.xyz`
+* **Block Explorer**: `https://testnet.monadscan.com`
